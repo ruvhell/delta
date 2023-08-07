@@ -1,0 +1,222 @@
+docker compose
+
+
+services:
+#########################################################
+# CHAT# https://doc.traefik.io/traefik/routing/providers/docker/
+#########################################################
+  rocketchat:
+    image: registry.rocket.chat/rocketchat/rocket.chat:${RELEASE:-latest}
+    restart: on-failure
+    labels:
+      traefik.enable: true # Explicitly tell Traefik to expose this container
+      # traefik.http.routers.whoami.middlewares: my-fail2ban@file #plugins
+      # Rocket.Chat URL (replace with yours)
+      traefik.http.routers.rocketchat.rule: Host(`${DOMAIN}`) # The domain the service will respond to
+ # disbl after add           traefik.http.routers.rocketchat.service: rocketchat #Connecting Requests to Services
+      traefik.http.routers.rocketchat.entrypoints: websecure # Allow request only from the predefined entry point named "web"
+      traefik.http.services.rocketchat.loadbalancer.server.port: 3000 #Registers a port. Useful when the container exposes multiples ports.
+      traefik.http.routers.rocketchat.tls: true #When a TLS section is specified, it instructs Traefik that the current router is dedicated to HTTPS requests only
+#      traefik.http.routers.rocketchat.tls.certresolver: letsencrypt #If certResolver is defined, Traefik will try to generate certificates based on routers Host & HostSNI rules
+      traefik.http.services.rocketchat.loadbalancer.passhostheader: true #The passHostHeader allows to forward client Host header to server.
+# disbl after add      traefik.http.routers.rocketchat.middlewares: compresstraefik #Attached to the routers, pieces of middleware are a means of tweaking the requests before they are sent to your service
+      traefik.http.routers.rocketchat.middlewares: waf@docker #Attached to the routers, pieces of middleware are a means of tweaking the requests before they are sent to your service
+      traefik.http.middlewares.compresstraefik.compress: true #Compress Responses before Sending them to the Client
+
+
+    volumes:
+      - /docker/rocket-app:/app/uploads
+      
+    healthcheck:
+      test: >
+         /usr/local/bin/node -e '
+         const http = require("http");
+         const options = {
+           host: "localhost",
+           port: 3000,
+           path: "/api/info",
+           timeout: 2000
+         };
+         const healthCheck = http.request(options, (res) => {
+           console.log(`HEALTHCHECK STATUS: $${res.statusCode}`);
+           if (res.statusCode == 200) {
+             process.exit(0);
+           } else {
+             process.exit(1);
+           }
+         });
+         healthCheck.on("error", function (err) {
+           console.error("ERROR");
+           process.exit(1);
+         });
+         healthCheck.end();'
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      
+    environment:
+      MONGO_URL: ${MONGO_URL}
+      MONGO_OPLOG_URL: ${MONGO_OPLOG_URL}
+      ROOT_URL: ${ROOT_URL:-http://localhost:${HOST_PORT:-3000}}
+      PORT: ${PORT:-3000}
+      DEPLOY_METHOD: docker
+#      Accounts_UseDNSDomainCheck: 'false'
+#      DEPLOY_PLATFORM: ${DEPLOY_PLATFORM}
+#    expose:
+#      - ${PORT:-3000}
+#    ports:
+#      - "${BIND_IP:-0.0.0.0}:${HOST_PORT:-3000}:${PORT:-3000}"
+    depends_on:
+      - mongodb
+      - traefik
+###########################################################
+# BD mongo#
+###########################################################
+  mongodb:
+    image: bitnami/mongodb:${MONGODB_VERSION:-4.4}
+    restart: on-failure
+    volumes:
+      - /docker/mongo:/bitnami/mongodb
+    environment:
+      MONGODB_REPLICA_SET_MODE: primary
+      MONGODB_REPLICA_SET_NAME: ${MONGODB_REPLICA_SET_NAME:-rs0}
+      #####replicaset-key123 Encode to Base64 format https://www.base64encode.org/#######
+      MONGODB_REPLICA_SET_KEY: ${MONGODB_REPLICA_SET_KEY}
+      MONGODB_PORT_NUMBER: ${MONGODB_PORT_NUMBER:-27017}
+      MONGODB_INITIAL_PRIMARY_HOST: ${MONGODB_INITIAL_PRIMARY_HOST:-mongodb}
+      MONGODB_INITIAL_PRIMARY_PORT_NUMBER: ${MONGODB_INITIAL_PRIMARY_PORT_NUMBER:-27017}
+      MONGODB_ADVERTISED_HOSTNAME: ${MONGODB_ADVERTISED_HOSTNAME:-mongodb}
+      MONGODB_ENABLE_JOURNAL: "true"
+#      ALLOW_EMPTY_PASSWORD: ${ALLOW_EMPTY_PASSWORD:-yes}
+      MONGODB_ROOT_USER: ${MONGODB_ROOT_USER}
+      MONGODB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE}
+##    ports:
+##      - "27017:27017"
+#    healthcheck:
+#      test: echo 'db.runCommand("ping").ok' | mongo ${MONGODB_ROOT_USER}:${MONGODB_ROOT_PASSWORD}@${MONGODB_INITIAL_PRIMARY_HOST:-mongodb}:${MONGODB_PORT_NUMBER:-27017}/test --quiet
+#      test: echo 'db.runCommand("ping").ok' | mongo ${MONGODB_INITIAL_PRIMARY_HOST:-mongodb}:${MONGODB_PORT_NUMBER:-27017}/test --quiet
+  #    interval: 10s
+  #    timeout: 5s
+  #    retries: 3
+ #     start_period: 60s
+      #######################################################
+      # web GUI mongo DB#
+      #######################################################
+  mongo-express:
+    image: mongo-express
+    container_name: mongo-express
+    restart: always
+    ports:
+      - "8081:8081"
+    environment:
+#      useUnifiedTopology: 'true'
+      ME_CONFIG_OPTIONS_EDITORTHEME: default
+      ME_CONFIG_BASICAUTH_USERNAME: ${ME_CONFIG_BASICAUTH_USERNAME} #mongo-express web username
+      ME_CONFIG_BASICAUTH_PASSWORD: ${ME_CONFIG_BASICAUTH_PASSWORD} #mongo-express web password
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: true #Enable admin access to all databases. Send strings: `"true"` or `"false"`
+#      ME_CONFIG_MONGODB_AUTH_DATABASE: admin
+      ME_CONFIG_MONGODB_URL: ${ME_CONFIG_MONGODB_URL}
+    depends_on:
+      - mongodb
+#################################################
+# PROXY#
+#################################################
+  traefik:
+    # Image tag (replace with yours)
+    image: traefik:2.8
+    command:
+    ###########pugin############
+     # - "--experimental.plugins.fail2ban.modulename=github.com/tomMoulard/fail2ban"
+     # - "--experimental.plugins.fail2ban.version=v0.6.6"
+     # - "--providers.file.directory=/traefik/fail2ban"
+      - --experimental.localPlugins.traefik-modsecurity-plugin.moduleName=github.com/acouvreur/traefik-modsecurity-plugin ####add new for modsecurity
+      #########end plugin###############
+      - "--log.level=INFO" #Traefik logs concern everything that happens to Traefik itself. logging levels are DEBUG, PANIC, FATAL, ERROR, WARN, and INFO
+      - "--accesslog=true" #By default, logs are written to stdout, in text format.
+      - "--api.dashboard=true" #Dashboard that provides a detailed overview of the current status of your cluster.
+      - "--api.insecure=true" #Включаем доступ к dashboard в insecure режиме. 
+      - "--ping=true" #Checking the Health of Your Traefik Instances
+      - "--ping.entrypoint=ping" #Enabling /ping on a dedicated EntryPoint.
+      - "--entryPoints.ping.address=:8082"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--providers.docker=true" # Enabling docker provider
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock" #The docker-compose file shares the docker sock with the Traefik container
+      - "--providers.docker.exposedByDefault=false"  # Do not expose containers unless explicitly told so
+#      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true" #for Let's Encrypt
+      # Email for Let's Encrypt (replace with yours)
+#      - "--certificatesresolvers.letsencrypt.acme.email=it@XXXXXXXX.XX" #for Let's Encrypt
+#      - "--certificatesresolvers.letsencrypt.acme.storage=/etc/traefik/acme/acme.json" #for Let's Encrypt
+#      - "--metrics.prometheus=true" #to capture metrics of Traefik with Prometheus
+#      - "--metrics.prometheus.buckets=0.1,0.3,1.2,5.0" #defines the Prometheus bucket value (typically in seconds)
+      - "--global.checkNewVersion=true" #Periodically check if a new version has been released
+      - "--global.sendAnonymousUsage=false" #Periodically send anonymous usage statistics. If the option is not specified, it will be enabled by default.
+      - "--providers.file.directory=/etc/traefik/dynamic_conf"
+      - "--providers.file.watch=true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+#      - /docker/lets:/etc/traefik/acme
+#      - /docker/traefik:/traefik
+      - /docker/XXXXXXXX.XX:/tools/certs
+#      - /docker/XXXXXXXX.XX/wildcard.XXXXXXXX.XX.crt:/tools/certs/wildcard.XXXXXXXX.XX.crt
+#      - /docker/XXXXXXXX.XX/wildcard.XXXXXXXX.XX.key:/tools/certs/wildcard.XXXXXXXX.XX.key
+      - /docker/traefik/conf.yml:/etc/traefik/dynamic_conf/conf.yml:ro
+      - /docker/traefik-modsecurity-plugin-main:/plugins-local/src/github.com/acouvreur/traefik-modsecurity-plugin
+    ports:
+      - "80:80"
+      - "443:443"
+    healthcheck:
+      test: ["CMD", "wget", "http://localhost:8082/ping","--spider"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    labels:
+      - "traefik.enable=true" # Explicitly tell Traefik to expose this container
+      # Traefik URL (replace with yours)
+      - "traefik.http.routers.dashboard.rule=Host(`traefikac.rocket.XXXXXXXX.XX`)" # The domain the service will respond to
+      - "traefik.http.routers.dashboard.service=api@internal" #Connecting Requests to Services
+      - "traefik.http.routers.dashboard.entrypoints=websecure" # Allow request only from the predefined entry point named "web"
+      - "traefik.http.services.dashboard.loadbalancer.server.port=8080" #Registers a port. Useful when the container exposes multiples ports.
+      - "traefik.http.routers.dashboard.tls=true" #When a TLS section is specified, it instructs Traefik that the current router is dedicated to HTTPS requests only
+#      - "traefik.http.routers.dashboard.tls.certresolver=letsencrypt" #If certResolver is defined, Traefik will try to generate certificates based on routers Host & HostSNI rules
+      - "traefik.http.services.dashboard.loadbalancer.passhostheader=true" #The passHostHeader allows to forward client Host header to server.
+      - "traefik.http.routers.dashboard.middlewares=authtraefik" #Attached to the routers, pieces of middleware are a means of tweaking the requests before they are sent to your service
+      # Basic Authentication for Traefik Dashboard
+      # Username: traefikadminadmin (replace with yours)
+      # Passwords must be encoded using MD5, SHA1, or BCrypt https://hostingcanada.org/htpasswd-generator/ traefikadminadmintraefikadminadmin
+      - "traefik.http.middlewares.authtraefik.basicauth.users=SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS:YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)" #redirect-to-https
+      - "traefik.http.routers.http-catchall.entrypoints=web" #redirect-to-https
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https" #redirect-to-https
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https" #redirect-to-https
+      #########end plugin###############
+      - traefik.http.middlewares.waf.plugin.traefik-modsecurity-plugin.modSecurityUrl=http://waf:80 ####add new for modsecurity
+      - traefik.http.middlewares.waf.plugin.traefik-modsecurity-plugin.maxBodySize=10485760          ####add new for modsecurity
+      #########end plugin###############
+    restart: unless-stopped
+    depends_on:
+      - waf
+    
+#################################################
+# dummy for http resp 200-ok#
+#################################################   
+  dummy:
+    image: containous/whoami
+#################################################
+# THE waf
+#################################################  
+  waf:
+    image: owasp/modsecurity-crs:apache
+    environment:
+      - PARANOIA=1
+      - ANOMALY_INBOUND=15
+      - ANOMALY_OUTBOUND=8
+      - BACKEND=http://dummy
+#      - RESTRICTED_EXTENSIONS=.dll/ ###########dont work?????????????
+    depends_on:
+      - dummy
